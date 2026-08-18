@@ -1,6 +1,10 @@
 # Open or hide Ghostty's quick terminal from anywhere on macOS.
 keybind = global:super+g=toggle_quick_terminal
 
+# Navigate macOS tabs in opened order: Up toward older tabs, Down toward newer.
+keybind = shift+super+arrow_up=previous_tab
+keybind = shift+super+arrow_down=next_tab
+
 # Navigate macOS tabs with Shift+Command+Left/Right.
 keybind = shift+super+arrow_left=previous_tab
 keybind = shift+super+arrow_right=next_tab
