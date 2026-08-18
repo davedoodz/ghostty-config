@@ -1,6 +1,10 @@
 # Open or hide Ghostty's quick terminal from anywhere on macOS.
 keybind = global:super+g=toggle_quick_terminal
 
+# Jump to the previous or next shell prompt and pin it to the viewport top.
+keybind = super+arrow_up=jump_to_prompt:-1
+keybind = super+arrow_down=jump_to_prompt:1
+
 # Navigate macOS tabs in opened order: Up toward older tabs, Down toward newer.
 keybind = shift+super+arrow_up=previous_tab
 keybind = shift+super+arrow_down=next_tab
@@ -15,7 +19,7 @@ macos-titlebar-style = tabs
 # Use a dark tint with native macOS glass and increased transparency.
 background = #0B0F14
 foreground = #E6EDF3
-background-opacity = 0.645
+background-opacity = 0.55
 background-opacity-cells = true
 background-blur = macos-glass-regular
 
