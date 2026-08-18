@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { settings } from "@oh-my-pi/pi-coding-agent";
 import { generateSessionTitle } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 
@@ -10,13 +10,21 @@ Write a title of one or two short words for the task in <user>.
 
 The complete title must be at most 18 characters so it remains fully readable in a terminal tab. Prefer a concrete noun or a verb followed by a noun. Preserve names and technical terms exactly. Do not add punctuation, labels, quotes, or explanations. If there is no task, output <title/>.`;
 
-/** Terminal tabs cannot color text, so the repo marker is a colored glyph. */
+/** Terminal tabs cannot color text, so status and repo identity use glyphs. */
 const DOTS = ["🟢", "🔵", "🟣", "🟠", "🔴", "🟡", "🟤", "⚪", "⚫"];
+const ALERT_PREFIX = "⚠️";
+const DONE_PREFIX = "✅";
+
+/** Matches decorations this extension may have persisted in a session name. */
+const DOT_SUFFIX = new RegExp(`\\s*[${DOTS.join("")}]$`, "u");
+const STATUS_PREFIX = /^(?:⚠️|✅)\s*/u;
 
 /** repo root -> dot, so every open repo keeps one stable, unique color. */
 const REGISTRY = join(homedir(), ".omp", "agent", "tab-dots.json");
 
 const TITLE_BUDGET = 18;
+
+type TabState = "working" | "waiting" | "done";
 
 interface DotEntry {
 	dot: string;
@@ -110,19 +118,64 @@ function claimDot(repoRoot: string): string {
 export default function sessionTabTitle(pi: ExtensionAPI): void {
 	let requestVersion = 0;
 	let activeRequest: AbortController | undefined;
-	/** Empty until session_start resolves the workspace color. */
 	let dotSuffix = "";
+	let fallbackTitle = "";
+	let tabState: TabState = "working";
+	const pendingInput = new Set<string>();
 
-	pi.on("session_start", (_event, ctx) => {
+	const decorate = (name: string): string => {
+		const title = name.replace(DOT_SUFFIX, "").replace(STATUS_PREFIX, "");
+		const statusPrefix =
+			tabState === "waiting" ? `${ALERT_PREFIX} ` : tabState === "done" ? `${DONE_PREFIX} ` : "";
+		return `${statusPrefix}${title}${dotSuffix}`;
+	};
+
+	const renderState = async (ctx: ExtensionContext): Promise<void> => {
+		if (!ctx.hasUI) return;
+		const name = pi.getSessionName();
+		if (!name) {
+			if (fallbackTitle) ctx.ui.setTitle(decorate(fallbackTitle));
+			return;
+		}
+		const decorated = decorate(name);
+		if (decorated !== name) await pi.setSessionName(decorated);
+	};
+
+	const setTabState = async (state: TabState, ctx: ExtensionContext): Promise<void> => {
+		tabState = state;
+		await renderState(ctx);
+	};
+
+	const waitForInput = async (key: string, ctx: ExtensionContext): Promise<void> => {
+		pendingInput.add(key);
+		await setTabState("waiting", ctx);
+	};
+
+	const releaseInput = async (key: string, ctx: ExtensionContext): Promise<void> => {
+		pendingInput.delete(key);
+		if (pendingInput.size === 0) await setTabState("working", ctx);
+	};
+
+	pi.on("session_start", async (_event, ctx) => {
 		if (!ctx.hasUI) return;
 		const repoRoot = repoRootOf(ctx.cwd);
 		dotSuffix = ` ${claimDot(repoRoot)}`;
-		ctx.ui.setTitle(`${pi.getSessionName() ?? fitTab(basename(repoRoot))}${dotSuffix}`);
+		fallbackTitle = fitTab(basename(repoRoot));
+		pendingInput.clear();
+
+		// A named session is idle when opened, so show it as complete. A fresh,
+		// unnamed session stays neutral until its first turn finishes.
+		const name = pi.getSessionName();
+		tabState = name ? "done" : "working";
+		if (name) await pi.setSessionName(decorate(name));
+		else ctx.ui.setTitle(decorate(fallbackTitle));
 	});
 
 	pi.on("input", async (event, ctx) => {
 		if (event.source !== "interactive" || !event.text.trim()) return;
 
+		pendingInput.clear();
+		await setTabState("working", ctx);
 		activeRequest?.abort();
 		const controller = new AbortController();
 		activeRequest = controller;
@@ -152,11 +205,42 @@ export default function sessionTabTitle(pi: ExtensionAPI): void {
 		const title = fitTab(generated);
 		if (!title) return;
 
-		await pi.setSessionName(title);
-		ctx.ui.setTitle(`${title}${dotSuffix}`);
+		// Keep the current lifecycle marker: title generation can finish after an
+		// approval or ask prompt has already started.
+		await pi.setSessionName(decorate(title));
+	});
+
+	pi.on("turn_start", async (_event, ctx) => {
+		pendingInput.clear();
+		await setTabState("working", ctx);
+	});
+
+	pi.on("tool_approval_requested", async (event, ctx) => {
+		await waitForInput(`approval:${event.toolCallId}`, ctx);
+	});
+
+	pi.on("tool_approval_resolved", async (event, ctx) => {
+		await releaseInput(`approval:${event.toolCallId}`, ctx);
+	});
+
+	// The ask tool blocks while its dialog waits for a selection or typed answer.
+	pi.on("tool_call", async (event, ctx) => {
+		if (event.toolName === "ask") await waitForInput(`ask:${event.toolCallId}`, ctx);
+	});
+
+	pi.on("tool_result", async (event, ctx) => {
+		if (event.toolName === "ask") await releaseInput(`ask:${event.toolCallId}`, ctx);
+	});
+
+	// Core auto-titles and /rename may write an undecorated name during a turn.
+	// Re-stamp the settled title and replace any alert with the completion mark.
+	pi.on("turn_end", async (_event, ctx) => {
+		pendingInput.clear();
+		await setTabState("done", ctx);
 	});
 
 	pi.on("session_shutdown", () => {
 		activeRequest?.abort();
+		pendingInput.clear();
 	});
 }
