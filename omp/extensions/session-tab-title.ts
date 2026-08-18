@@ -156,6 +156,47 @@ export default function sessionTabTitle(pi: ExtensionAPI): void {
 		if (pendingInput.size === 0) await setTabState("working", ctx);
 	};
 
+	const updateTitle = async (
+		text: string,
+		ctx: ExtensionContext,
+		controller: AbortController,
+		version: number,
+	): Promise<void> => {
+		const sessionId = ctx.sessionManager.getSessionId();
+		try {
+			const generated = await generateSessionTitle(
+				text,
+				ctx.modelRegistry,
+				settings,
+				sessionId,
+				ctx.model,
+				undefined,
+				TITLE_PROMPT,
+				controller.signal,
+			);
+
+			if (
+				!generated ||
+				controller.signal.aborted ||
+				version !== requestVersion ||
+				ctx.sessionManager.getSessionId() !== sessionId
+			) {
+				return;
+			}
+
+			const title = fitTab(generated);
+			if (!title) return;
+
+			// Keep the current lifecycle marker: title generation can finish after an
+			// approval or ask prompt has already started.
+			await pi.setSessionName(decorate(title));
+		} catch {
+			// The title is cosmetic: provider or persistence failures must not affect input.
+		} finally {
+			if (activeRequest === controller) activeRequest = undefined;
+		}
+	};
+
 	pi.on("session_start", async (_event, ctx) => {
 		if (!ctx.hasUI) return;
 		const repoRoot = repoRootOf(ctx.cwd);
@@ -180,34 +221,7 @@ export default function sessionTabTitle(pi: ExtensionAPI): void {
 		const controller = new AbortController();
 		activeRequest = controller;
 		const version = ++requestVersion;
-		const sessionId = ctx.sessionManager.getSessionId();
-
-		const generated = await generateSessionTitle(
-			event.text,
-			ctx.modelRegistry,
-			settings,
-			sessionId,
-			ctx.model,
-			undefined,
-			TITLE_PROMPT,
-			controller.signal,
-		);
-
-		if (
-			!generated ||
-			controller.signal.aborted ||
-			version !== requestVersion ||
-			ctx.sessionManager.getSessionId() !== sessionId
-		) {
-			return;
-		}
-
-		const title = fitTab(generated);
-		if (!title) return;
-
-		// Keep the current lifecycle marker: title generation can finish after an
-		// approval or ask prompt has already started.
-		await pi.setSessionName(decorate(title));
+		void updateTitle(event.text, ctx, controller, version);
 	});
 
 	pi.on("turn_start", async (_event, ctx) => {
